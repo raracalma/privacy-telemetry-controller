@@ -3,6 +3,18 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val keystorePath = System.getenv("KEYSTORE_PATH")
+val keystorePasswordValue = System.getenv("KEYSTORE_PASSWORD")
+val keyAliasValue = System.getenv("KEY_ALIAS")
+val keyPasswordValue = System.getenv("KEY_PASSWORD")
+
+val hasReleaseKey = listOf(
+    keystorePath,
+    keystorePasswordValue,
+    keyAliasValue,
+    keyPasswordValue
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.privacy.controller"
     compileSdk = 35
@@ -11,18 +23,46 @@ android {
         applicationId = "com.privacy.controller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
-    buildFeatures { compose = true }
-    composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                storeFile = file(keystorePath!!)
+                storePassword = keystorePasswordValue!!
+                keyAlias = keyAliasValue!!
+                keyPassword = keyPasswordValue!!
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            if (hasReleaseKey) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
 
 dependencies {
@@ -33,11 +73,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
-
-    // Shizuku API. The first version reports availability; privileged operations
-    // will be added behind explicit user confirmation and capability checks.
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
-
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -5,101 +5,169 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import rikka.shizuku.Shizuku
 
+private const val SHIZUKU_REQUEST_CODE = 1001
+
 private data class InstalledApp(
     val name: String,
     val packageName: String,
-    val isSystemApp: Boolean
+    val isSystemApp: Boolean,
+    val permissions: List<String>
 )
 
 class MainActivity : ComponentActivity() {
+
+    private var shizukuMessage by mutableStateOf("Verificando Shizuku...")
+    private var shizukuAuthorized by mutableStateOf(false)
+
+    private val permissionListener =
+        Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+            if (requestCode == SHIZUKU_REQUEST_CODE) {
+                shizukuAuthorized =
+                    grantResult == PackageManager.PERMISSION_GRANTED
+
+                shizukuMessage = if (shizukuAuthorized) {
+                    "Shizuku autorizado"
+                } else {
+                    "Autorização não concedida"
+                }
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val apps = runCatching {
-            @Suppress("DEPRECATION")
-            packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
-                .map { app ->
-                    InstalledApp(
-                        name = packageManager.getApplicationLabel(app).toString(),
-                        packageName = app.packageName,
-                        isSystemApp = (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                    )
-                }
-                .sortedBy { it.name.lowercase() }
-        }.getOrDefault(emptyList())
+        Shizuku.addRequestPermissionResultListener(permissionListener)
+        updateShizukuStatus()
+
+        val apps = loadInstalledApps()
 
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     PrivacyDashboard(
                         apps = apps,
-                        shizukuStatus = {
-                            when {
-                                !Shizuku.pingBinder() ->
-                                    "Shizuku não está ativo"
-                                Shizuku.checkSelfPermission() ==
-                                    PackageManager.PERMISSION_GRANTED ->
-                                    "Shizuku conectado e autorizado"
-                                else ->
-                                    "Shizuku ativo, autorização pendente"
-                            }
-                        },
-                        openShizukuSettings = {
-                            runCatching {
-                                packageManager.getLaunchIntentForPackage(
-                                    "moe.shizuku.privileged.api"
-                                )?.let { startActivity(it) }
-                            }
-                        }
+                        shizukuMessage = shizukuMessage,
+                        shizukuAuthorized = shizukuAuthorized,
+                        requestShizuku = { requestShizukuPermission() }
                     )
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateShizukuStatus()
+    }
+
+    override fun onDestroy() {
+        Shizuku.removeRequestPermissionResultListener(permissionListener)
+        super.onDestroy()
+    }
+
+    private fun updateShizukuStatus() {
+        try {
+            when {
+                !Shizuku.pingBinder() -> {
+                    shizukuAuthorized = false
+                    shizukuMessage = "Shizuku não está iniciado"
+                }
+
+                Shizuku.checkSelfPermission() ==
+                    PackageManager.PERMISSION_GRANTED -> {
+                    shizukuAuthorized = true
+                    shizukuMessage = "Shizuku conectado e autorizado"
+                }
+
+                else -> {
+                    shizukuAuthorized = false
+                    shizukuMessage = "Shizuku ativo, autorização pendente"
+                }
+            }
+        } catch (e: Exception) {
+            shizukuAuthorized = false
+            shizukuMessage = "Não foi possível verificar Shizuku"
+        }
+    }
+
+    private fun requestShizukuPermission() {
+        try {
+            if (!Shizuku.pingBinder()) {
+                shizukuMessage = "Inicie o Shizuku primeiro"
+                return
+            }
+
+            if (Shizuku.isPreV11()) {
+                shizukuMessage = "Versão do Shizuku incompatível"
+                return
+            }
+
+            if (Shizuku.checkSelfPermission() ==
+                PackageManager.PERMISSION_GRANTED) {
+                shizukuAuthorized = true
+                shizukuMessage = "Shizuku já está autorizado"
+                return
+            }
+
+            Shizuku.requestPermission(SHIZUKU_REQUEST_CODE)
+            shizukuMessage = "Aguardando autorização..."
+        } catch (e: Exception) {
+            shizukuMessage = "Erro ao solicitar autorização"
+        }
+    }
+
+    private fun loadInstalledApps(): List<InstalledApp> {
+        return runCatching {
+            @Suppress("DEPRECATION")
+            packageManager.getInstalledApplications(
+                PackageManager.GET_META_DATA
+            ).map { app ->
+                val permissions = runCatching {
+                    @Suppress("DEPRECATION")
+                    packageManager.getPackageInfo(
+                        app.packageName,
+                        PackageManager.GET_PERMISSIONS
+                    ).requestedPermissions?.toList() ?: emptyList()
+                }.getOrDefault(emptyList())
+
+                InstalledApp(
+                    name = packageManager.getApplicationLabel(app).toString(),
+                    packageName = app.packageName,
+                    isSystemApp =
+                        (app.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
+                    permissions = permissions
+                )
+            }.sortedBy { it.name.lowercase() }
+        }.getOrDefault(emptyList())
     }
 }
 
 @Composable
 private fun PrivacyDashboard(
     apps: List<InstalledApp>,
-    shizukuStatus: () -> String,
-    openShizukuSettings: () -> Unit
+    shizukuMessage: String,
+    shizukuAuthorized: Boolean,
+    requestShizuku: () -> Unit
 ) {
-    var showDetails by remember { mutableStateOf(false) }
-    var showApps by remember { mutableStateOf(false) }
+    var selectedApp by remember { mutableStateOf<InstalledApp?>(null) }
     var search by remember { mutableStateOf("") }
     var showSystemApps by remember { mutableStateOf(false) }
 
     val filteredApps = remember(apps, search, showSystemApps) {
-        apps.filter { app ->
-            (showSystemApps || !app.isSystemApp) &&
-                (app.name.contains(search, ignoreCase = true) ||
-                    app.packageName.contains(search, ignoreCase = true))
+        apps.filter {
+            (showSystemApps || !it.isSystemApp) &&
+                (it.name.contains(search, true) ||
+                    it.packageName.contains(search, true))
         }
     }
 
@@ -110,150 +178,188 @@ private fun PrivacyDashboard(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("PRIVACY TELEMETRY", style = MaterialTheme.typography.labelLarge)
+        Text(
+            "PRIVACY TELEMETRY",
+            style = MaterialTheme.typography.labelLarge
+        )
+
         Text(
             "Sua privacidade,\nno seu controle.",
             style = MaterialTheme.typography.headlineLarge
         )
-        Text(
-            "Painel local para revisar aplicativos e preparar controles de privacidade do Android.",
-            style = MaterialTheme.typography.bodyLarge
-        )
-
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Column(
-                Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Estado do Shizuku", style = MaterialTheme.typography.titleMedium)
-                Text(shizukuStatus())
-                Button(
-                    onClick = openShizukuSettings,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Abrir Shizuku")
-                }
-            }
-        }
 
         Card {
             Column(
                 Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Aplicativos instalados", style = MaterialTheme.typography.titleMedium)
-                Text("Encontrados: ${apps.size}")
-                OutlinedButton(
-                    onClick = { showApps = !showApps },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (showApps) "Ocultar aplicativos" else "Ver aplicativos")
-                }
+                Text(
+                    "Integração Shizuku",
+                    style = MaterialTheme.typography.titleMedium
+                )
 
-                if (showApps) {
+                Text(shizukuMessage)
+
+                Button(
+                    onClick = requestShizuku,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !shizukuAuthorized
+                ) {
+                    Text(
+                        if (shizukuAuthorized)
+                            "Shizuku autorizado"
+                        else
+                            "Autorizar Shizuku"
+                    )
+                }
+            }
+        }
+
+        if (selectedApp != null) {
+            AppDetails(
+                app = selectedApp!!,
+                onBack = { selectedApp = null }
+            )
+        } else {
+            Card {
+                Column(
+                    Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "Gerenciador de aplicativos",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+
+                    Text("Encontrados: ${apps.size}")
+
                     OutlinedTextField(
                         value = search,
                         onValueChange = { search = it },
-                        label = { Text("Buscar por nome ou pacote") },
+                        label = { Text("Buscar aplicativo") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { showSystemApps = !showSystemApps }) {
-                            Text(if (showSystemApps) "Ocultar sistema" else "Incluir sistema")
+
+                    OutlinedButton(
+                        onClick = {
+                            showSystemApps = !showSystemApps
                         }
+                    ) {
+                        Text(
+                            if (showSystemApps)
+                                "Ocultar aplicativos do sistema"
+                            else
+                                "Incluir aplicativos do sistema"
+                        )
                     }
+
                     Text("Resultados: ${filteredApps.size}")
 
                     filteredApps.take(100).forEach { app ->
-                        HorizontalAppItem(app)
-                    }
-
-                    if (filteredApps.size > 100) {
-                        Text("Mostrando os primeiros 100 resultados.")
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selectedApp = app }
+                        ) {
+                            Column(
+                                Modifier.padding(12.dp),
+                                verticalArrangement =
+                                    Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    app.name,
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    app.packageName,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    if (app.isSystemApp)
+                                        "Aplicativo do sistema"
+                                    else
+                                        "Aplicativo instalado",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                                Text(
+                                    "Toque para ver detalhes e permissões",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        FeatureCard(
-            title = "Bloqueio de rastreadores",
-            description = "Ainda não filtra conexões de rede. Um bloqueador real precisará de VPN local ou firewall compatível."
-        )
-        FeatureCard(
-            title = "Permissões e AppOps",
-            description = "A listagem está disponível. Ler e alterar operações de aplicativos será uma próxima etapa, com confirmação."
-        )
-        FeatureCard(
-            title = "Diagnóstico do aparelho",
-            description = "As configurações nativas do Android e da Samsung continuam sendo úteis para reduzir diagnósticos e personalização."
-        )
-
-        OutlinedButton(
-            onClick = { showDetails = !showDetails },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (showDetails) "Ocultar limites" else "O que esta versão ainda não faz")
-        }
-
-        if (showDetails) {
-            Card {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        "Esta versão lista aplicativos, mas ainda não bloqueia conexões, " +
-                            "não altera AppOps e não desativa pacotes. O Shizuku não concede " +
-                            "root: as operações disponíveis dependem do Android e das " +
-                            "autorizações concedidas."
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
         Text(
-            "Versão 0.2.0 • processamento local",
+            "Privacy Telemetry Controller • 0.3.0",
             style = MaterialTheme.typography.labelMedium
         )
     }
 }
 
 @Composable
-private fun HorizontalAppItem(app: InstalledApp) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            Modifier.padding(10.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            Text(app.name, style = MaterialTheme.typography.titleSmall)
-            Text(app.packageName, style = MaterialTheme.typography.bodySmall)
-            Text(
-                if (app.isSystemApp) "Aplicativo do sistema" else "Aplicativo instalado",
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-    }
-}
-
-@Composable
-private fun FeatureCard(title: String, description: String) {
+private fun AppDetails(
+    app: InstalledApp,
+    onBack: () -> Unit
+) {
     Card {
         Column(
             Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(description, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                app.name,
+                style = MaterialTheme.typography.headlineSmall
+            )
+
+            Text(app.packageName)
+
+            Text(
+                if (app.isSystemApp)
+                    "Aplicativo do sistema"
+                else
+                    "Aplicativo instalado"
+            )
+
+            Divider()
+
+            Text(
+                "Permissões declaradas: ${app.permissions.size}",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            if (app.permissions.isEmpty()) {
+                Text("Nenhuma permissão declarada foi encontrada.")
+            } else {
+                app.permissions.forEach { permission ->
+                    Text(
+                        "• $permission",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            Divider()
+
+            Text(
+                "Esta tela mostra as permissões declaradas pelo aplicativo. " +
+                    "Elas não significam necessariamente que o acesso esteja " +
+                    "concedido ou sendo utilizado."
+            )
+
+            Text(
+                "O controle AppOps será conectado na próxima etapa."
+            )
+
+            OutlinedButton(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Voltar aos aplicativos")
+            }
         }
     }
 }
